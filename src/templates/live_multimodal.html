@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Multimodal DeepFake Detector</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #111827; }
+        .gauge-container { position: relative; width: 150px; height: 150px; }
+        .gauge-bg, .gauge-fill { fill: none; stroke-width: 14; transform: rotate(-90deg 75px 75px); }
+        .gauge-bg { stroke: #374151; }
+        .gauge-fill { stroke-linecap: round; transition: all 0.5s ease; }
+        .gauge-text { font-size: 2rem; font-weight: 700; fill: #F9FAFB; }
+        #live-video-container { position: relative; }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen text-white p-4">
+
+    <main class="w-full max-w-4xl bg-gray-800 rounded-2xl shadow-2xl p-8 grid grid-cols-1 lg:grid-cols-2 gap-8">
+        
+        <!-- Left Column: Video Feed and Controls -->
+        <div class="flex flex-col space-y-4">
+            <h1 class="text-3xl font-bold text-center">Live Call Analysis</h1>
+            <div id="live-video-container" class="bg-black rounded-lg overflow-hidden aspect-video">
+                <video id="live-video" class="w-full h-full" autoplay muted playsinline></video>
+            </div>
+            <p id="status-message" class="text-gray-400 h-5 text-center">Click "Start" to begin monitoring.</p>
+            <div class="flex gap-4">
+                <button id="start-btn" class="w-full bg-green-600 font-semibold py-3 rounded-lg hover:bg-green-700 transition">Start</button>
+                <button id="stop-btn" class="w-full bg-red-600 font-semibold py-3 rounded-lg hover:bg-red-700 transition hidden">Stop</button>
+            </div>
+        </div>
+
+        <!-- Right Column: Results Dashboard -->
+        <div class="flex flex-col justify-center items-center space-y-6">
+            <h2 class="text-2xl font-semibold">Detection Scores</h2>
+            
+            <!-- Voice Score Gauge -->
+            <div class="text-center">
+                <div class="gauge-container mx-auto">
+                    <svg viewBox="0 0 150 150">
+                        <circle class="gauge-bg" cx="75" cy="75" r="68"></circle>
+                        <circle id="voice-gauge-fill" class="gauge-fill" cx="75" cy="75" r="68"></circle>
+                        <text id="voice-gauge-text" class="gauge-text" x="50%" y="50%" dominant-baseline="middle" text-anchor="middle">--%</text>
+                    </svg>
+                </div>
+                <p class="mt-2 text-lg font-medium text-gray-300">Voice Score</p>
+            </div>
+
+            <!-- Video Score Gauge -->
+            <div class="text-center">
+                <div class="gauge-container mx-auto">
+                    <svg viewBox="0 0 150 150">
+                        <circle class="gauge-bg" cx="75" cy="75" r="68"></circle>
+                        <circle id="video-gauge-fill" class="gauge-fill" cx="75" cy="75" r="68"></circle>
+                        <text id="video-gauge-text" class="gauge-text" x="50%" y="50%" dominant-baseline="middle" text-anchor="middle">--%</text>
+                    </svg>
+                </div>
+                <p class="mt-2 text-lg font-medium text-gray-300">Video Score</p>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // --- State and Config ---
+        const SAMPLE_RATE = 16000;
+        const GAUGE_RADIUS = 68;
+        const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
+
+        let socket;
+        let audioContext;
+        let microphone;
+        let videoStreamInterval;
+        let isStreaming = false;
+
+        // --- DOM Elements ---
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const statusMessage = document.getElementById('status-message');
+        const liveVideo = document.getElementById('live-video');
+        
+        const voiceGaugeFill = document.getElementById('voice-gauge-fill');
+        const voiceGaugeText = document.getElementById('voice-gauge-text');
+        const videoGaugeFill = document.getElementById('video-gauge-fill');
+        const videoGaugeText = document.getElementById('video-gauge-text');
+        
+        // --- Event Listeners ---
+        startBtn.addEventListener('click', startStreaming);
+        stopBtn.addEventListener('click', stopStreaming);
+
+        // --- Core Logic ---
+        async function startStreaming() {
+            if (isStreaming) return;
+            isStreaming = true;
+
+            socket = io(); // Connect to the WebSocket server
+
+            socket.on('connect', async () => {
+                console.log('Connected to multimodal server');
+                statusMessage.textContent = 'Accessing camera and microphone...';
+                
+                try {
+                    // 1. Get both audio and video streams
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+                    liveVideo.srcObject = stream;
+                    
+                    // --- Start Audio Streaming ---
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+                    microphone = audioContext.createMediaStreamSource(stream);
+                    await audioContext.audioWorklet.addModule('/static/audioProcessor.js');
+                    const audioProcessorNode = new AudioWorkletNode(audioContext, 'audio-processor');
+                    microphone.connect(audioProcessorNode).connect(audioContext.destination);
+                    audioProcessorNode.port.onmessage = (event) => {
+                        if (socket && isStreaming) socket.emit('audio_chunk', Array.from(event.data));
+                    };
+
+                    // --- Start Video Streaming ---
+                    const canvas = document.createElement('canvas');
+                    const context = canvas.getContext('2d');
+                    
+                    videoStreamInterval = setInterval(() => {
+                        if (!isStreaming) return;
+                        canvas.width = liveVideo.videoWidth;
+                        canvas.height = liveVideo.videoHeight;
+                        context.drawImage(liveVideo, 0, 0, canvas.width, canvas.height);
+                        const dataUrl = canvas.toDataURL('image/jpeg', 0.7); // Send as JPEG
+                        socket.emit('video_frame', dataUrl);
+                    }, 1000); // Send a video frame every second
+
+                    statusMessage.textContent = 'Monitoring...';
+                    startBtn.classList.add('hidden');
+                    stopBtn.classList.remove('hidden');
+
+                } catch (err) {
+                    statusMessage.textContent = 'Error: Could not access camera/mic.';
+                    console.error('Media access error:', err);
+                    stopStreaming();
+                }
+            });
+
+            socket.on('prediction_result', (data) => {
+                if (data.audio_score !== undefined) updateGauge(voiceGaugeFill, voiceGaugeText, data.audio_score);
+                if (data.video_score !== undefined) updateGauge(videoGaugeFill, videoGaugeText, data.video_score);
+            });
+        }
+
+        function stopStreaming() {
+            if (!isStreaming) return;
+            isStreaming = false;
+
+            clearInterval(videoStreamInterval);
+            videoStreamInterval = null;
+            
+            if (liveVideo.srcObject) {
+                liveVideo.srcObject.getTracks().forEach(track => track.stop());
+                liveVideo.srcObject = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+            }
+
+            statusMessage.textContent = 'Click "Start" to begin monitoring.';
+            startBtn.classList.remove('hidden');
+            stopBtn.classList.add('hidden');
+            updateGauge(voiceGaugeFill, voiceGaugeText, null); // Reset gauges
+            updateGauge(videoGaugeFill, videoGaugeText, null);
+        }
+        
+        function updateGauge(fillElement, textElement, score) {
+            if (score === null) {
+                textElement.textContent = '--%';
+                fillElement.style.strokeDashoffset = GAUGE_CIRCUMFERENCE;
+                fillElement.style.stroke = '#4B5563'; // Gray-600
+                return;
+            }
+            const percentage = Math.round(score);
+            const offset = GAUGE_CIRCUMFERENCE - (percentage / 100) * GAUGE_CIRCUMFERENCE;
+            
+            fillElement.style.strokeDasharray = `${GAUGE_CIRCUMFERENCE} ${GAUGE_CIRCUMFERENCE}`;
+            fillElement.style.strokeDashoffset = offset;
+
+            if (percentage > 70) fillElement.style.stroke = '#EF4444'; // Red-500
+            else if (percentage > 40) fillElement.style.stroke = '#F59E0B'; // Amber-500
+            else fillElement.style.stroke = '#22C55E'; // Green-500
+
+            textElement.textContent = `${percentage}%`;
+        }
+    </script>
+</body>
+</html>

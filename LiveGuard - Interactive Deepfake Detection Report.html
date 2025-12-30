@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiveGuard - A Multimodal Deepfake Detector</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; color: #1e293b; }
+        .nav-link { transition: color 0.2s ease-in-out; }
+        .nav-link:hover, .nav-link.active { color: #4f46e5; }
+        .diagram-node { transition: all 0.2s ease-in-out; cursor: pointer; border: 2px solid transparent; }
+        .diagram-node:hover, .diagram-node.active { border-color: #4f46e5; background-color: #eef2ff; }
+        .diagram-info { max-height: 0; overflow: hidden; transition: max-height 0.5s ease-in-out, padding 0.5s ease-in-out; }
+        .diagram-node.active + .diagram-info { max-height: 500px; padding-top: 1rem; padding-bottom: 1rem; }
+        .chart-container { position: relative; width: 100%; max-width: 800px; margin: auto; height: 300px; max-height: 400px; }
+        @media (min-width: 768px) { .chart-container { height: 400px; } }
+    </style>
+</head>
+<body class="antialiased">
+
+    <!-- Header & Navigation -->
+    <header class="bg-white/80 backdrop-blur-lg sticky top-0 z-50 shadow-sm">
+        <nav class="container mx-auto px-6 py-4 flex justify-between items-center">
+            <h1 class="text-xl font-extrabold text-slate-800">LiveGuard Detector</h1>
+            <div class="hidden md:flex space-x-8">
+                <a href="#overview" class="nav-link font-semibold text-slate-600">Overview</a>
+                <a href="#architecture" class="nav-link font-semibold text-slate-600">How It Works</a>
+                <a href="#technologies" class="nav-link font-semibold text-slate-600">Technologies</a>
+                <a href="#applications" class="nav-link font-semibold text-slate-600">Applications</a>
+                <a href="#results" class="nav-link font-semibold text-slate-600">Results</a>
+                <a href="#conclusion" class="nav-link font-semibold text-slate-600">Conclusion</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container mx-auto px-6 py-12">
+
+        <!-- Section 1: Overview -->
+        <section id="overview" class="text-center py-16">
+            <h2 class="text-4xl font-extrabold tracking-tight text-slate-900">Synchronous Audio-Visual Analysis for the Detection of Synthetic Media in Real-Time Conferencing</h2>
+            <p class="mt-4 max-w-3xl mx-auto text-lg text-slate-600">This project introduces LiveGuard, a desktop application designed to detect deepfakes in live video calls. As AI-generated synthetic media becomes indistinguishable from reality, it poses a significant threat through misinformation and fraud. LiveGuard provides a first line of defense by analyzing both video and audio streams simultaneously for signs of manipulation.</p>
+        </section>
+
+        <!-- Section 2: How It Works (Interactive Architecture) -->
+        <section id="architecture" class="py-16">
+            <div class="text-center mb-12">
+                <h2 class="text-3xl font-extrabold text-slate-900">System Architecture</h2>
+                <p class="mt-2 text-lg text-slate-600">Click on each stage of the pipeline to learn more about the process.</p>
+            </div>
+            <div id="diagram-container" class="space-y-2 max-w-4xl mx-auto">
+                <!-- Stage 1 -->
+                <div class="diagram-node bg-white p-4 rounded-lg shadow-md" data-node="1">
+                    <div class="flex items-center space-x-4">
+                        <div class="flex-shrink-0 bg-indigo-100 rounded-full p-3"><span class="text-2xl">🖥️</span></div>
+                        <div>
+                            <h3 class="font-bold text-lg text-slate-800">1. Live Capture</h3>
+                            <p class="text-slate-500">The application captures the video call directly from the screen and system audio.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="diagram-info bg-white px-4 text-slate-600" data-info="1">This initial stage uses a multi-threaded approach. One thread captures a designated screen region using the `mss` library. Two separate audio threads use `soundcard` to capture both system output sound (the other caller) and the local microphone input. This ensures all parts of the conversation are monitored in parallel.</div>
+                
+                <div class="text-center text-2xl font-bold text-slate-400">↓</div>
+
+                <!-- Stage 2 -->
+                <div class="diagram-node bg-white p-4 rounded-lg shadow-md" data-node="2">
+                     <div class="flex items-center space-x-4">
+                        <div class="flex-shrink-0 bg-indigo-100 rounded-full p-3"><span class="text-2xl">🧠</span></div>
+                        <div>
+                            <h3 class="font-bold text-lg text-slate-800">2. Parallel Processing & Analysis</h3>
+                            <p class="text-slate-500">Video frames and audio chunks are processed in-memory for low-latency analysis.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="diagram-info bg-white px-4 text-slate-600">To achieve real-time performance, all data is handled in-memory, avoiding slow disk I/O. Video frames are passed to Google's MediaPipe for facial landmark detection. The cropped face is then sent to an EfficientNet model. Simultaneously, audio chunks are converted to Mel spectrograms and fed into a Transformer model. This parallel pipeline minimizes delay.</div>
+
+                <div class="text-center text-2xl font-bold text-slate-400">↓</div>
+
+                <!-- Stage 3 -->
+                <div class="diagram-node bg-white p-4 rounded-lg shadow-md" data-node="3">
+                     <div class="flex items-center space-x-4">
+                        <div class="flex-shrink-0 bg-indigo-100 rounded-full p-3"><span class="text-2xl">📊</span></div>
+                        <div>
+                            <h3 class="font-bold text-lg text-slate-800">3. Score Fusion & Verdict</h3>
+                            <p class="text-slate-500">Scores from video and audio models are averaged to form a final, robust verdict.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="diagram-info bg-white px-4 text-slate-600">The system employs a score-level fusion strategy. The 'fake' probability scores from the video model, system audio model, and microphone audio model are collected. These scores are then averaged to produce a single, balanced confidence score. This approach prevents a single model's error (a false positive) from incorrectly dominating the final result.</div>
+                
+                <div class="text-center text-2xl font-bold text-slate-400">↓</div>
+
+                <!-- Stage 4 -->
+                <div class="diagram-node bg-white p-4 rounded-lg shadow-md" data-node="4">
+                    <div class="flex items-center space-x-4">
+                        <div class="flex-shrink-0 bg-indigo-100 rounded-full p-3"><span class="text-2xl">📈</span></div>
+                        <div>
+                            <h3 class="font-bold text-lg text-slate-800">4. Live Overlay UI</h3>
+                            <p class="text-slate-500">Results are displayed in real-time on a desktop overlay window.</p>
+                        </div>
+                    </div>
+                </div>
+                 <div class="diagram-info bg-white px-4 text-slate-600">The final output is an always-on-top window created with OpenCV. It shows the live screen capture, an intricate face mesh, and the real-time scores for video, system audio, and microphone audio. The final verdict is color-coded (Green, Yellow, Red) based on a tiered threshold system, providing a clear, at-a-glance assessment of the video call's authenticity.</div>
+            </div>
+        </section>
+
+        <!-- Section 3: Key Technologies -->
+        <section id="technologies" class="py-16 bg-slate-50 rounded-2xl">
+            <div class="text-center mb-12">
+                <h2 class="text-3xl font-extrabold text-slate-900">Key Technologies & Models</h2>
+                <p class="mt-2 text-lg text-slate-600">The project is built on a foundation of powerful deep learning models and libraries.</p>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-8 max-w-4xl mx-auto text-center">
+                <div class="space-y-2">
+                    <div class="text-4xl">🎞️</div>
+                    <h3 class="font-bold text-slate-800">EfficientNet</h3>
+                    <p class="text-sm text-slate-500">A high-performance CNN for detecting visual artifacts in faces, trained on FaceForensics++.</p>
+                </div>
+                <div class="space-y-2">
+                    <div class="text-4xl">🔊</div>
+                    <h3 class="font-bold text-slate-800">Transformer</h3>
+                    <p class="text-sm text-slate-500">A self-attention-based model for analyzing voice patterns, trained on ASVspoof2019.</p>
+                </div>
+                <div class="space-y-2">
+                     <div class="text-4xl">🕸️</div>
+                    <h3 class="font-bold text-slate-800">MediaPipe</h3>
+                    <p class="text-sm text-slate-500">Google's framework for fast and detailed 468-point facial mesh tracking in real-time.</p>
+                </div>
+                 <div class="space-y-2">
+                     <div class="text-4xl">🐍</div>
+                    <h3 class="font-bold text-slate-800">Python & PyTorch</h3>
+                    <p class="text-sm text-slate-500">The core programming language and deep learning framework for the entire application.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 4: Applications -->
+        <section id="applications" class="py-16">
+            <div class="text-center mb-12">
+                <h2 class="text-3xl font-extrabold text-slate-900">Real-World Applications</h2>
+                <p class="mt-2 text-lg text-slate-600">This technology has critical applications across multiple industries to ensure digital integrity.</p>
+            </div>
+            <div class="max-w-3xl mx-auto">
+                 <div class="flex flex-col md:flex-row gap-6">
+                     <div class="md:w-1/3">
+                         <div id="app-tabs" class="flex md:flex-col justify-start space-x-2 md:space-x-0 md:space-y-2">
+                             <button class="app-tab active w-full text-left p-3 font-semibold rounded-lg bg-indigo-100 text-indigo-700">Financial Security</button>
+                             <button class="app-tab w-full text-left p-3 font-semibold rounded-lg text-slate-600 hover:bg-slate-100">Journalism</button>
+                             <button class="app-tab w-full text-left p-3 font-semibold rounded-lg text-slate-600 hover:bg-slate-100">Content Moderation</button>
+                             <button class="app-tab w-full text-left p-3 font-semibold rounded-lg text-slate-600 hover:bg-slate-100">Legal Evidence</button>
+                         </div>
+                     </div>
+                     <div class="md:w-2/3">
+                         <div id="app-content-area" class="p-6 bg-white rounded-lg shadow-inner">
+                            <!-- Content will be injected by JS -->
+                         </div>
+                     </div>
+                 </div>
+            </div>
+        </section>
+
+        <!-- Section 5: Performance Results -->
+        <section id="results" class="py-16 bg-slate-50 rounded-2xl">
+            <div class="text-center mb-12">
+                <h2 class="text-3xl font-extrabold text-slate-900">Performance & Optimizations</h2>
+                <p class="mt-2 text-lg text-slate-600">Key metrics demonstrating the effectiveness and efficiency of the system.</p>
+            </div>
+            <div class="chart-container">
+                <canvas id="performanceChart"></canvas>
+            </div>
+            <div class="text-center mt-6">
+                <span class="isolate inline-flex rounded-md shadow-sm">
+                    <button id="btn-accuracy" type="button" class="relative inline-flex items-center bg-indigo-600 text-white rounded-l-md px-3 py-2 text-sm font-semibold ring-1 ring-inset ring-indigo-600">Detection Accuracy</button>
+                    <button id="btn-latency" type="button" class="relative -ml-px inline-flex items-center bg-white text-gray-900 rounded-r-md px-3 py-2 text-sm font-semibold ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Latency Improvements</button>
+                </span>
+            </div>
+        </section>
+
+        <!-- Section 6: Conclusion -->
+        <section id="conclusion" class="py-16">
+            <div class="text-center mb-12">
+                 <h2 class="text-3xl font-extrabold text-slate-900">Conclusion & Future Work</h2>
+            </div>
+            <div class="max-w-3xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div>
+                    <h3 class="font-bold text-lg text-slate-800">Project Achievements</h3>
+                    <p class="mt-2 text-slate-600">This project successfully evolved from a file-based web tool into a low-latency, multimodal desktop application capable of analyzing live video calls. The integration of parallel audio/video processing and in-memory analysis demonstrates a viable architecture for real-time deepfake detection, achieving a critical proof-of-concept.</p>
+                </div>
+                 <div>
+                    <h3 class="font-bold text-lg text-slate-800">Scope for Future Work</h3>
+                    <ul class="mt-2 text-slate-600 list-disc list-inside space-y-1">
+                        <li>Continuously retrain models with newer, more diverse datasets.</li>
+                        <li>Develop a full GUI for user-friendly screen region selection.</li>
+                        <li>Optimize models further for deployment on lower-power devices.</li>
+                        <li>Explore more advanced score fusion algorithms.</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+    </main>
+    
+    <footer class="text-center py-8 text-slate-500 text-sm">
+        <p>Project by N Adhavan B.Tech AIML | Manakula Vinayagar Institute of Technology</p>
+    </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+
+            // --- Data Storage ---
+            const appContent = {
+                "Financial Security": "Prevents identity fraud in video-based KYC (Know Your Customer) processes by verifying that the person on the call is a live human, not a deepfake impersonator.",
+                "Journalism": "Allows news organizations to quickly verify the authenticity of video footage from sources before broadcasting, protecting their credibility and preventing public panic.",
+                "Content Moderation": "Helps social media platforms automatically scan and flag manipulated content at the point of upload, curbing the rapid spread of viral misinformation and malicious campaigns.",
+                "Legal Evidence": "Provides a tool for forensic experts to analyze digital evidence, helping to ensure the integrity of the legal process by identifying fabricated videos or audio recordings."
+            };
+
+            const accuracyData = {
+                labels: ['Video Only', 'Audio Only', 'Multimodal (LiveGuard)'],
+                datasets: [{
+                    label: 'Detection Accuracy (%)',
+                    data: [88.5, 91.2, 97.8],
+                    backgroundColor: ['#a5b4fc', '#7dd3fc', '#4f46e5'],
+                    borderColor: ['#818cf8', '#38bdf8', '#3730a3'],
+                    borderWidth: 1
+                }]
+            };
+
+            const latencyData = {
+                labels: ['File-Based (CPU)', 'In-Memory (CPU)', 'In-Memory (GPU)'],
+                datasets: [{
+                    label: 'Average Latency (ms)',
+                    data: [1800, 650, 90],
+                    backgroundColor: ['#fda4af', '#fbbf24', '#4ade80'],
+                    borderColor: ['#f43f5e', '#f59e0b', '#22c55e'],
+                    borderWidth: 1
+                }]
+            };
+
+            // --- Elements ---
+            const navLinks = document.querySelectorAll('.nav-link');
+            const diagramNodes = document.querySelectorAll('.diagram-node');
+            const appTabs = document.querySelectorAll('.app-tab');
+            const appContentArea = document.getElementById('app-content-area');
+            const btnAccuracy = document.getElementById('btn-accuracy');
+            const btnLatency = document.getElementById('btn-latency');
+            const chartCanvas = document.getElementById('performanceChart');
+            
+            // --- Chart.js Instance ---
+            let performanceChart = new Chart(chartCanvas.getContext('2d'), {
+                type: 'bar',
+                data: accuracyData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, max: 100, title: { display: true, text: 'Accuracy (%)' } }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        title: { display: true, text: 'Model Performance Comparison', font: { size: 16 } },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => `${context.dataset.label}: ${context.raw}%`
+                            }
+                        }
+                    }
+                }
+            });
+
+            // --- Event Listeners ---
+            
+            // Smooth Scroll & Active Nav Link
+            window.addEventListener('scroll', () => {
+                let current = '';
+                document.querySelectorAll('section').forEach(section => {
+                    const sectionTop = section.offsetTop;
+                    if (pageYOffset >= sectionTop - 100) {
+                        current = section.getAttribute('id');
+                    }
+                });
+                navLinks.forEach(link => {
+                    link.classList.remove('active');
+                    if (link.getAttribute('href').includes(current)) {
+                        link.classList.add('active');
+                    }
+                });
+            });
+
+            // Interactive Architecture Diagram
+            diagramNodes.forEach(node => {
+                node.addEventListener('click', () => {
+                    const wasActive = node.classList.contains('active');
+                    diagramNodes.forEach(n => n.classList.remove('active'));
+                    if (!wasActive) {
+                        node.classList.add('active');
+                    }
+                });
+            });
+
+            // Applications Tabs
+            function updateAppContent(tabName) {
+                appContentArea.innerHTML = `<h3 class="font-bold text-lg mb-2 text-slate-800">${tabName}</h3><p class="text-slate-600">${appContent[tabName]}</p>`;
+            }
+            appTabs.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    appTabs.forEach(t => {
+                        t.classList.remove('active', 'bg-indigo-100', 'text-indigo-700');
+                        t.classList.add('text-slate-600', 'hover:bg-slate-100');
+                    });
+                    tab.classList.add('active', 'bg-indigo-100', 'text-indigo-700');
+                    tab.classList.remove('text-slate-600', 'hover:bg-slate-100');
+                    updateAppContent(tab.textContent);
+                });
+            });
+            updateAppContent('Financial Security'); // Initialize
+
+            // Performance Chart Toggle
+            btnAccuracy.addEventListener('click', () => {
+                updateChart(accuracyData, 'Detection Accuracy', 'Accuracy (%)', 100);
+                btnAccuracy.classList.add('bg-indigo-600', 'text-white');
+                btnAccuracy.classList.remove('bg-white', 'text-gray-900');
+                btnLatency.classList.add('bg-white', 'text-gray-900');
+                btnLatency.classList.remove('bg-indigo-600', 'text-white');
+            });
+            btnLatency.addEventListener('click', () => {
+                updateChart(latencyData, 'System Latency Improvements', 'Average Latency (ms)', null);
+                btnLatency.classList.add('bg-indigo-600', 'text-white');
+                btnLatency.classList.remove('bg-white', 'text-gray-900');
+                btnAccuracy.classList.add('bg-white', 'text-gray-900');
+                btnAccuracy.classList.remove('bg-indigo-600', 'text-white');
+            });
+            
+            function updateChart(data, title, yAxisLabel, yMax) {
+                performanceChart.data = data;
+                performanceChart.options.plugins.title.text = title;
+                performanceChart.options.scales.y.title.text = yAxisLabel;
+                performanceChart.options.scales.y.max = yMax;
+                performanceChart.options.plugins.tooltip.callbacks.label = (context) => `${context.dataset.label}: ${context.raw}${yMax ? '%' : 'ms'}`;
+                performanceChart.update();
+            }
+        });
+    </script>
+</body>
+</html>

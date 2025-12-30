@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Distribution / Build
+dist/
+build/
+*.spec
+
+# IDEs
+.vscode/
+.idea/
+
+# Large Files / Models
+models/*.pth
+src/ffmpeg.exe
+*.dat
+
+
+# Logs/Temp
+*.log
+mp_init.txt
+
+# Java (if unrelated)
+openJdk-25/
