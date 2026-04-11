@@ -1,0 +1,17 @@
+{
+    "audio": {
+        "silence_threshold": 0.002,
+        "system_audio_penalty_multiplier": 0.6,
+        "fake_logit_penalty": 2.0
+    },
+    "video": {
+        "high_conf_threshold": 0.95,
+        "warn_threshold": 0.7514799999999999,
+        "min_face_size": 50,
+        "prediction_interval": 0.5,
+        "ema_alpha": 0.3
+    },
+    "ui": {
+        "screen_capture_width_fallback": 930
+    }
+}

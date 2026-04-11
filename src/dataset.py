@@ -15,36 +15,47 @@ import config
 class MusanAugment:
     """
     A class to handle augmentation by adding noise or music from the MUSAN dataset.
+    MUSAN is optional — if the folder is absent, all augmentation calls are no-ops.
     """
     def __init__(self, musan_path):
         self.musan_path = musan_path
-        
+        self.available = os.path.isdir(musan_path)
+
+        if not self.available:
+            import warnings
+            warnings.warn(
+                f"MUSAN dataset not found at '{musan_path}'. "
+                "Noise augmentation will be skipped during training."
+            )
+            self.noise_files = []
+            self.music_files = []
+            return
+
         # Find all noise and music files
         noise_path_pattern = os.path.join(musan_path, 'noise', '**', '*.wav')
         self.noise_files = glob.glob(noise_path_pattern, recursive=True)
-        
-        # --- FIX: Add a check to ensure noise files were found ---
+
         if not self.noise_files:
-            raise FileNotFoundError(
-                f"No noise files found matching the pattern: {noise_path_pattern}\n"
-                "Please check the following:\n"
-                "1. You have downloaded and extracted the MUSAN dataset.\n"
-                "2. The 'musan' folder is located directly inside your 'data' directory.\n"
-                "3. The path in 'src/config.py' for MUSAN_PATH is correct."
+            import warnings
+            warnings.warn(
+                f"No noise WAV files found in '{musan_path}/noise/'. "
+                "Noise augmentation will be skipped."
             )
-        
+
         music_path_pattern = os.path.join(musan_path, 'music', '**', '*.wav')
         self.music_files = glob.glob(music_path_pattern, recursive=True)
 
 
     def add_noise(self, waveform, min_snr=5, max_snr=20):
-        """Adds random noise to a waveform with a random SNR."""
+        """Adds random noise to a waveform with a random SNR. No-op if MUSAN unavailable."""
+        if not self.noise_files:
+            return waveform
         noise_file = random.choice(self.noise_files)
         noise_waveform, sr = torchaudio.load(noise_file)
-        
+
         if sr != config.SAMPLE_RATE:
             noise_waveform = torchaudio.transforms.Resample(sr, config.SAMPLE_RATE)(noise_waveform)
-        
+
         return self._mix_waveforms(waveform, noise_waveform, min_snr, max_snr)
 
     def add_music(self, waveform, min_snr=5, max_snr=15):
@@ -93,9 +104,9 @@ class ASVspoofDataset(Dataset):
         self.max_len = max_len_seconds * config.SAMPLE_RATE
         self.is_train = is_train
         
-        # Initialize augmentation if it's a training set
+        # Initialize augmentation if it's a training set (MUSAN is optional)
         if self.is_train:
-            self.augmenter = MusanAugment(config.MUSAN_PATH)
+            self.augmenter = MusanAugment(config.MUSAN_PATH)  # gracefully no-ops if missing
 
 
     def __len__(self):

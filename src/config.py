@@ -9,11 +9,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = PROJECT_ROOT / 'data'
 
 # ASVspoof Dataset paths (for voice)
-VOICE_DATA_DIR = DATA_ROOT / 'ASVspoof2019_LA_train' / 'flac'
-VOICE_TRAIN_PROTOCOL_PATH = DATA_ROOT / 'ASVspoof2019_LA_cm_protocols' / 'ASVspoof2019.LA.cm.train.trn.txt'
-VOICE_DEV_PROTOCOL_PATH = DATA_ROOT / 'ASVspoof2019_LA_cm_protocols' / 'ASVspoof2019.LA.cm.dev.trl.txt'
-VOICE_EVAL_PROTOCOL_PATH = DATA_ROOT / 'ASVspoof2019_LA_cm_protocols' / 'ASVspoof2019.LA.cm.eval.trl.txt'
-VOICE_EVAL_DATA_DIR = DATA_ROOT / 'ASVspoof2019_LA_eval' / 'flac'
+# Actual extracted layout: data/ASVspoof 2019 Dataset/LA/LA/...
+ASVSPOOF_LA_ROOT          = DATA_ROOT / 'ASVspoof 2019 Dataset' / 'LA' / 'LA'
+VOICE_DATA_DIR            = ASVSPOOF_LA_ROOT / 'ASVspoof2019_LA_train' / 'flac'
+VOICE_TRAIN_PROTOCOL_PATH = ASVSPOOF_LA_ROOT / 'ASVspoof2019_LA_cm_protocols' / 'ASVspoof2019.LA.cm.train.trn.txt'
+VOICE_DEV_PROTOCOL_PATH   = ASVSPOOF_LA_ROOT / 'ASVspoof2019_LA_cm_protocols' / 'ASVspoof2019.LA.cm.dev.trl.txt'
+VOICE_EVAL_PROTOCOL_PATH  = ASVSPOOF_LA_ROOT / 'ASVspoof2019_LA_cm_protocols' / 'ASVspoof2019.LA.cm.eval.trl.txt'
+VOICE_EVAL_DATA_DIR       = ASVSPOOF_LA_ROOT / 'ASVspoof2019_LA_eval' / 'flac'
+
+# LibriSpeech (genuine speech negatives for calibrated retraining)
+LIBRISPEECH_DIR           = DATA_ROOT / 'LibriSpeech' / 'dev-clean'
 
 # MUSAN Dataset Path
 MUSAN_PATH = DATA_ROOT / 'musan'

@@ -9,163 +9,59 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
 import mediapipe as mp
-# Reverted explicit imports that caused ModuleNotFoundError
-# We will solve this via PyInstaller hidden imports instead
+import customtkinter as ctk
+from PIL import Image
 from collections import deque, namedtuple
 import re
 import math
 import os
+import json
+import logging
 from torch.utils import model_zoo
+
+# Set up unified logging pipeline
+log_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'shield_defense.log')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(threadName)s: %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("SHIELD")
+
+# Load Config
+def load_config() -> dict:
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"[{config_path}] Loading config failed: {e}. Using defaults.")
+        return {}
+
+APP_CONFIG = load_config()
+AUDIO_CONFIG = APP_CONFIG.get('audio', {})
+VIDEO_CONFIG = APP_CONFIG.get('video', {})
+UI_CONFIG = APP_CONFIG.get('ui', {})
 
 # Import the actual model classes and prediction functions
 from predict import model as AudioModel, mel_spectrogram
 
+# --- Performance & Core Threading Fix ---
+# Limit PyTorch to 1-2 cores. When it uses all cores, it starves the 
+# Windows soundcard capture loop, creating digital static/data discontinuity!
+torch.set_num_threads(2)
+
 # --- GPU / CPU Device Setup ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"--- Using device: {device} ---")
+logger.info(f"--- Using device: {device} ---")
 if not torch.cuda.is_available():
-    print("--- WARNING: No CUDA GPU detected. The application will run on the CPU and may be slow. ---")
+    logger.warning("--- WARNING: No CUDA GPU detected. The application will run on the CPU and may be slow. ---")
 
-# --- EfficientNet Model Definition (Self-contained for portability) ---
-GlobalParams = namedtuple('GlobalParams', [
-    'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate',
-    'num_classes', 'width_coefficient', 'depth_coefficient',
-    'depth_divisor', 'min_depth', 'drop_connect_rate', 'image_size'])
-BlockArgs = namedtuple('BlockArgs', [
-    'kernel_size', 'num_repeat', 'input_filters', 'output_filters',
-    'expand_ratio', 'id_skip', 'stride', 'se_ratio'])
-GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
-BlockArgs.__new__.__defaults__ = (None,) * len(BlockArgs._fields)
-
-def relu_fn(x):
-    """ Swish activation function """
-    return x * torch.sigmoid(x)
-
-def round_filters(filters, global_params):
-    """ Calculate and round number of filters based on depth multiplier. """
-    multiplier = global_params.width_coefficient
-    if not multiplier:
-        return filters
-    divisor = global_params.depth_divisor
-    min_depth = global_params.min_depth
-    filters *= multiplier
-    min_depth = min_depth or divisor
-    new_filters = max(min_depth, int(filters + divisor / 2) // divisor * divisor)
-    if new_filters < 0.9 * filters:  # prevent rounding by more than 10%
-        new_filters += divisor
-    return int(new_filters)
-
-def round_repeats(repeats, global_params):
-    """ Round number of filters based on depth multiplier. """
-    multiplier = global_params.depth_coefficient
-    if not multiplier:
-        return repeats
-    return int(math.ceil(multiplier * repeats))
-
-class MBConvBlock(nn.Module):
-    """ Mobile Inverted Residual Bottleneck Block """
-    def __init__(self, block_args, global_params):
-        super().__init__()
-        self._block_args = block_args
-        self._bn_mom = 1 - global_params.batch_norm_momentum
-        self._bn_eps = global_params.batch_norm_epsilon
-        self.has_se = (self._block_args.se_ratio is not None) and (0 < self._block_args.se_ratio <= 1)
-        self.id_skip = block_args.id_skip
-        inp = self._block_args.input_filters
-        oup = self._block_args.input_filters * self._block_args.expand_ratio
-        if self._block_args.expand_ratio != 1:
-            self._expand_conv = nn.Conv2d(in_channels=inp, out_channels=oup, kernel_size=1, bias=False)
-            self._bn0 = nn.BatchNorm2d(num_features=oup, momentum=self._bn_mom, eps=self._bn_eps)
-        k, s = self._block_args.kernel_size, self._block_args.stride
-        self._depthwise_conv = nn.Conv2d(
-            in_channels=oup, out_channels=oup, groups=oup,
-            kernel_size=k, stride=s, padding=(k - 1) // 2, bias=False)
-        self._bn1 = nn.BatchNorm2d(num_features=oup, momentum=self._bn_mom, eps=self._bn_eps)
-        if self.has_se:
-            num_squeezed_channels = max(1, int(self._block_args.input_filters * self._block_args.se_ratio))
-            self._se_reduce = nn.Conv2d(in_channels=oup, out_channels=num_squeezed_channels, kernel_size=1)
-            self._se_expand = nn.Conv2d(in_channels=num_squeezed_channels, out_channels=oup, kernel_size=1)
-        final_oup = self._block_args.output_filters
-        self._project_conv = nn.Conv2d(in_channels=oup, out_channels=final_oup, kernel_size=1, bias=False)
-        self._bn2 = nn.BatchNorm2d(num_features=final_oup, momentum=self._bn_mom, eps=self._bn_eps)
-
-    def forward(self, inputs, drop_connect_rate=None):
-        x = inputs
-        if self._block_args.expand_ratio != 1: x = relu_fn(self._bn0(self._expand_conv(inputs)))
-        x = relu_fn(self._bn1(self._depthwise_conv(x)))
-        if self.has_se:
-            x_squeezed = F.adaptive_avg_pool2d(x, 1)
-            x_squeezed = self._se_expand(relu_fn(self._se_reduce(x_squeezed)))
-            x = torch.sigmoid(x_squeezed) * x
-        x = self._bn2(self._project_conv(x))
-        if self.id_skip and self._block_args.stride == 1 and self._block_args.input_filters == self._block_args.output_filters:
-            if drop_connect_rate: x = F.dropout(x, p=drop_connect_rate, training=self.training)
-            x = x + inputs
-        return x
-
-class EfficientNet(nn.Module):
-    """ An EfficientNet model. """
-    def __init__(self, blocks_args=None, global_params=None):
-        super().__init__()
-        self._global_params, self._blocks_args = global_params, blocks_args
-        bn_mom, bn_eps = 1 - self._global_params.batch_norm_momentum, self._global_params.batch_norm_epsilon
-        in_channels, out_channels = 3, round_filters(32, self._global_params)
-        self._conv_stem = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, bias=False)
-        self._bn0 = nn.BatchNorm2d(num_features=out_channels, momentum=bn_mom, eps=bn_eps)
-        self._blocks = nn.ModuleList([])
-        for block_args in self._blocks_args:
-            block_args = block_args._replace(
-                input_filters=round_filters(block_args.input_filters, self._global_params),
-                output_filters=round_filters(block_args.output_filters, self._global_params),
-                num_repeat=round_repeats(block_args.num_repeat, self._global_params))
-            self._blocks.append(MBConvBlock(block_args, self._global_params))
-            if block_args.num_repeat > 1:
-                block_args = block_args._replace(input_filters=block_args.output_filters, stride=1)
-            for _ in range(block_args.num_repeat - 1): self._blocks.append(MBConvBlock(block_args, self._global_params))
-        in_channels = block_args.output_filters
-        out_channels = round_filters(1280, self._global_params)
-        self._conv_head = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self._bn1 = nn.BatchNorm2d(num_features=out_channels, momentum=bn_mom, eps=bn_eps)
-        self._dropout = self._global_params.dropout_rate
-        self._fc = nn.Linear(out_channels, self._global_params.num_classes)
-
-    def forward(self, inputs):
-        x = relu_fn(self._bn0(self._conv_stem(inputs)))
-        for idx, block in enumerate(self._blocks):
-            drop_connect_rate = self._global_params.drop_connect_rate
-            if drop_connect_rate: drop_connect_rate *= float(idx) / len(self._blocks)
-            x = block(x, drop_connect_rate=drop_connect_rate)
-        x = relu_fn(self._bn1(self._conv_head(x)))
-        x = F.adaptive_avg_pool2d(x, 1).squeeze(-1).squeeze(-1)
-        if self._dropout: x = F.dropout(x, p=self._dropout, training=self.training)
-        x = self._fc(x)
-        return x
-
-def efficientnet_params(model_name): return (1.0, 1.0, 224, 0.2)
-
-class BlockDecoder(object):
-    @staticmethod
-    def _decode_block_string(block_string):
-        ops, options = block_string.split('_'), {}
-        for op in ops:
-            splits = re.split(r'(\d.*)', op)
-            if len(splits) >= 2: key, value = splits[:2]; options[key] = value
-        return BlockArgs(
-            kernel_size=int(options['k']), num_repeat=int(options['r']),
-            input_filters=int(options['i']), output_filters=int(options['o']),
-            expand_ratio=int(options['e']), id_skip=('noskip' not in block_string),
-            se_ratio=float(options['se']) if 'se' in options else None,
-            stride=[int(options['s'][0])])
-    @staticmethod
-    def decode(string_list): return [BlockDecoder._decode_block_string(s) for s in string_list]
-
-def get_model_params(model_name, override_params):
-    w, d, s, p = efficientnet_params(model_name)
-    blocks_args = BlockDecoder.decode(['r1_k3_s11_e1_i32_o16_se0.25', 'r2_k3_s22_e6_i16_o24_se0.25', 'r2_k5_s22_e6_i24_o40_se0.25', 'r3_k3_s22_e6_i40_o80_se0.25', 'r3_k5_s11_e6_i80_o112_se0.25', 'r4_k5_s22_e6_i112_o192_se0.25', 'r1_k3_s11_e6_i192_o320_se0.25'])
-    global_params = GlobalParams(batch_norm_momentum=0.99, batch_norm_epsilon=1e-3, dropout_rate=p, drop_connect_rate=0.2, num_classes=1000, width_coefficient=w, depth_coefficient=d, depth_divisor=8, min_depth=None, image_size=s)
-    if override_params: global_params = global_params._replace(**override_params)
-    return blocks_args, global_params
-# --- End of EfficientNet Definition ---
+# Import the extracted EfficientNet model
+from video_model import EfficientNet, get_model_params
 
 # --- In-Memory Prediction Functions ---
 video_transform = transforms.Compose([
@@ -175,7 +71,7 @@ video_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-def predict_video_from_frame(frame_rgb, model):
+def predict_video_from_frame(frame_rgb: np.ndarray, model: torch.nn.Module) -> float:
     if frame_rgb is None or model is None or frame_rgb.shape[0] == 0 or frame_rgb.shape[1] == 0: return 0.0
     input_tensor = video_transform(frame_rgb).unsqueeze(0).to(device)
     with torch.no_grad():
@@ -184,90 +80,155 @@ def predict_video_from_frame(frame_rgb, model):
         score = probabilities[0][1].item()
     return score
 
-def predict_audio_from_chunk(audio_data, model):
+def predict_audio_from_chunk(audio_data: np.ndarray, model: torch.nn.Module) -> float:
     if audio_data is None or model is None: return 0.0
     waveform = torch.from_numpy(audio_data).unsqueeze(0).to(device)
     mel_spec = mel_spectrogram(waveform).to(device)
     with torch.no_grad():
         output = model(mel_spec)
+        # Apply a mathematical penalty to the 'Fake' logit to reduce artificial sensitivity
+        output[0][1] -= AUDIO_CONFIG.get('fake_logit_penalty', 2.0)
         probabilities = torch.softmax(output, dim=1)
         score = probabilities[0][1].item()
     return score
 
 # --- Shared State for All Threads ---
 shared_state = {
-    'video_score': 0.0, 'system_audio_score': 0.0, 'mic_audio_score': 0.0,
-    'system_audio_active': False, 'mic_audio_active': False, 'lock': threading.Lock()
+    'video_score': 0.0, 'video_ema': -1.0, 'system_audio_score': 0.0, 'mic_audio_score': 0.0,
+    'system_audio_active': False, 'mic_audio_active': False, 
+    'system_audio_silence': True, 'mic_audio_silence': True,
+    'latest_frame': None, 'running': True, 'lock': threading.Lock()
 }
 
+def is_silence(audio_data: np.ndarray, threshold: float = None) -> bool:
+    if threshold is None: threshold = AUDIO_CONFIG.get('silence_threshold', 0.002)
+    rms = np.sqrt(np.mean(audio_data**2))
+    return rms < threshold
+
 # --- Audio Capture Threads ---
-def system_audio_capture_thread(audio_model):
+def system_audio_capture_thread(audio_model: torch.nn.Module) -> None:
     """Continuously captures and analyzes system audio (what you hear)."""
     try:
         mics = sc.all_microphones(include_loopback=True)
-        loopback_mic = next((m for m in mics if 'loopback' in m.name.lower() or 'stereo mix' in m.name.lower()), None)
+        loopback_mic = None
+        # Safest way: Find the loopback that exactly matches the default speaker's name
+        try:
+            default_spk_name = sc.default_speaker().name
+            loopback_mic = next((m for m in mics if m.name == default_spk_name and getattr(m, 'isloopback', False)), None)
+        except Exception:
+            pass
         if loopback_mic is None:
-            print("[System Audio] ERROR: No loopback audio device found.")
+            # Fallback 1: Any mic marked as loopback
+            loopback_mic = next((m for m in mics if getattr(m, 'isloopback', False)), None)
+        if loopback_mic is None:
+            # Fallback 2: Name contains legacy terms
+            loopback_mic = next((m for m in mics if 'loopback' in m.name.lower() or 'stereo mix' in m.name.lower() or 'speaker' in m.name.lower()), None)
+            
+        if loopback_mic is None:
+            logger.error("[System Audio] No loopback audio device found.")
             return
-        print(f"\n[System Audio] Success! Monitoring from: {loopback_mic.name}")
+        logger.info(f"[System Audio] Success! Monitoring from: {loopback_mic.name}")
         with shared_state['lock']: shared_state['system_audio_active'] = True
         SAMPLE_RATE, CHUNK_SAMPLES = 16000, 16000 * 2
-        while True:
-            with loopback_mic.recorder(samplerate=SAMPLE_RATE, channels=1) as rec:
+        
+        def run_inference(data_chunk):
+            score = predict_audio_from_chunk(data_chunk, audio_model)
+            # Artificially cap the system audio score to 60% of its raw output
+            score = score * AUDIO_CONFIG.get('system_audio_penalty_multiplier', 0.60)
+            with shared_state['lock']:
+                shared_state['system_audio_score'] = score
+                
+        with loopback_mic.recorder(samplerate=SAMPLE_RATE, channels=1) as rec:
+            while True:
                 audio_data = rec.record(numframes=CHUNK_SAMPLES)
-                score = predict_audio_from_chunk(audio_data.flatten(), audio_model)
-                with shared_state['lock']: shared_state['system_audio_score'] = score
-    except Exception as e: print(f"[System Audio] Error: {e}")
+                flat_audio = audio_data.flatten()
+                silence = is_silence(flat_audio)
+                with shared_state['lock']:
+                    shared_state['system_audio_silence'] = silence
+                if not silence:
+                    # Run asynchronously to prevent audio buffer overruns
+                    threading.Thread(target=run_inference, args=(flat_audio.copy(),), daemon=True).start()
+
+    except Exception as e: logger.error(f"[System Audio] Error: {e}")
     finally:
         with shared_state['lock']: shared_state['system_audio_active'] = False
 
-def microphone_capture_thread(audio_model):
+def microphone_capture_thread(audio_model: torch.nn.Module) -> None:
     """Continuously captures and analyzes audio from the default microphone."""
     try:
         mic = sc.default_microphone()
         if mic is None:
-            print("[Mic Audio] ERROR: No default microphone found.")
+            logger.error("[Mic Audio] No default microphone found.")
             return
-        print(f"[Mic Audio] Success! Monitoring from: {mic.name}")
+        logger.info(f"[Mic Audio] Success! Monitoring from: {mic.name}")
         with shared_state['lock']: shared_state['mic_audio_active'] = True
         SAMPLE_RATE, CHUNK_SAMPLES = 16000, 16000 * 2
-        while True:
-            with mic.recorder(samplerate=SAMPLE_RATE, channels=1) as rec:
+        
+        def run_inference(data_chunk):
+            score = predict_audio_from_chunk(data_chunk, audio_model)
+            with shared_state['lock']:
+                shared_state['mic_audio_score'] = score
+
+        with mic.recorder(samplerate=SAMPLE_RATE, channels=1) as rec:
+            while True:
                 audio_data = rec.record(numframes=CHUNK_SAMPLES)
-                score = predict_audio_from_chunk(audio_data.flatten(), audio_model)
-                with shared_state['lock']: shared_state['mic_audio_score'] = score
-    except Exception as e: print(f"[Mic Audio] Error: {e}")
+                flat_audio = audio_data.flatten()
+                silence = is_silence(flat_audio)
+                with shared_state['lock']:
+                    shared_state['mic_audio_silence'] = silence
+                if not silence:
+                    # Run asynchronously to prevent audio buffer overruns
+                    threading.Thread(target=run_inference, args=(flat_audio.copy(),), daemon=True).start()
+
+    except Exception as e: logger.error(f"[Mic Audio] Error: {e}")
     finally:
         with shared_state['lock']: shared_state['mic_audio_active'] = False
 
 # --- Main Video Capture and UI Thread ---
-def main(video_model, audio_model):
-    """Main function for screen capture, video detection, and UI rendering."""
-    print("Starting Live Multimodal Desktop Detector...")
-    print("Press 'q' on the detector window to quit.")
-    
-    system_audio_thread = threading.Thread(target=system_audio_capture_thread, args=(audio_model,), daemon=True)
-    microphone_thread = threading.Thread(target=microphone_capture_thread, args=(audio_model,), daemon=True)
-    system_audio_thread.start()
-    microphone_thread.start()
-    
-    monitor = {"top": 100, "left": 100, "width": 1000, "height": 1000}
-    
+def video_capture_thread(video_model: torch.nn.Module) -> None:
+    """Background thread for screen capture and video detection."""
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(max_num_faces=1, min_detection_confidence=0.5, min_tracking_confidence=0.5)
     mp_drawing = mp.solutions.drawing_utils
-
-    video_score_buffer = deque(maxlen=5)
     last_prediction_time = time.time()
     
-    HIGH_CONF_THRESHOLD, WARN_THRESHOLD, MIN_FACE_SIZE = 0.95, 0.75, 50
+    HIGH_CONF_THRESHOLD = VIDEO_CONFIG.get('high_conf_threshold', 0.95)
+    WARN_THRESHOLD = VIDEO_CONFIG.get('warn_threshold', 0.75)
+    MIN_FACE_SIZE = VIDEO_CONFIG.get('min_face_size', 50)
+    prediction_interval = VIDEO_CONFIG.get('prediction_interval', 0.5)
 
     with mss.mss() as sct:
         while True:
+            # Check exit flag
+            with shared_state['lock']:
+                if not shared_state['running']:
+                    break
+                mx = shared_state.get('mouse_x', 0)
+                my = shared_state.get('mouse_y', 0)
+
+            # Automatically select the monitor where the cursor currently is
+            current_monitor = sct.monitors[1]
+            if len(sct.monitors) > 1:
+                for m in sct.monitors[1:]:
+                    if m["left"] <= mx < (m["left"] + m["width"]) and m["top"] <= my < (m["top"] + m["height"]):
+                        current_monitor = m
+                        break
+
+            half_width = current_monitor["width"] // 2
+            
+            # Dynamic capture layout: explicitly capture right half
+            monitor = {
+                "top": current_monitor["top"],
+                "left": current_monitor["left"] + half_width,
+                "width": half_width,
+                "height": current_monitor["height"]
+            }
+
             frame = np.array(sct.grab(monitor))
+            # Safely handle extra padding/stride bytes from MSS grab to prevent UI tearing
+            frame = np.ascontiguousarray(frame)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
             display_frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
             results = face_mesh.process(frame_rgb)
 
             if results.multi_face_landmarks:
@@ -289,71 +250,315 @@ def main(video_model, audio_model):
                     x, y = max(0, cx_min - padding), max(0, cy_min - padding)
                     box_w, box_h = (cx_max - cx_min) + 2*padding, (cy_max - cy_min) + 2*padding
                     if box_w > MIN_FACE_SIZE and box_h > MIN_FACE_SIZE:
-                        if time.time() - last_prediction_time > 0.5:
+                        if time.time() - last_prediction_time > prediction_interval:
                             face_crop = frame_rgb[y:y+box_h, x:x+box_w]
                             score = predict_video_from_frame(face_crop, video_model)
-                            video_score_buffer.append(score)
                             with shared_state['lock']:
-                                shared_state['video_score'] = np.mean(video_score_buffer) if video_score_buffer else 0.0
+                                current_ema = shared_state.get('video_ema', -1.0)
+                                alpha = VIDEO_CONFIG.get('ema_alpha', 0.3)
+                                if current_ema < 0:
+                                    new_ema = score
+                                else:
+                                    new_ema = (score * alpha) + (current_ema * (1 - alpha))
+                                shared_state['video_ema'] = new_ema
+                                shared_state['video_score'] = new_ema
                             last_prediction_time = time.time()
             else:
                  cv2.putText(display_frame, "Searching for face...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
-
+            
+            # Save frame for GUI
             with shared_state['lock']:
-                video_score, system_audio_score, mic_audio_score, system_audio_active, mic_audio_active = (
-                    shared_state['video_score'], shared_state['system_audio_score'], shared_state['mic_audio_score'],
-                    shared_state['system_audio_active'], shared_state['mic_audio_active'])
-            active_scores = [video_score]
-            if system_audio_active: active_scores.append(system_audio_score)
-            if mic_audio_active: active_scores.append(mic_audio_score)
-            final_score = np.mean(active_scores) if active_scores else 0.0
+                # The array striding is already cleaned by ascontiguousarray
+                shared_state['latest_frame'] = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
             
-            if final_score > HIGH_CONF_THRESHOLD: verdict, color = "Deepfake Detected", (0, 0, 255)
-            elif final_score > WARN_THRESHOLD: verdict, color = "Warning: High Score", (0, 255, 255)
-            else: verdict, color = "Likely Real", (0, 255, 0)
+            # Small sleep to prevent maxing out CPU
+            time.sleep(0.01)
             
-            y_pos = 40
-            cv2.putText(display_frame, f"Verdict: {verdict} ({final_score * 100:.1f}%)", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-            y_pos += 40
-            cv2.putText(display_frame, f"Video Score: {video_score * 100:.1f}% Fake", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            y_pos += 30
-            if system_audio_active: cv2.putText(display_frame, f"System Audio: {system_audio_score * 100:.1f}% Fake", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            else: cv2.putText(display_frame, "System Audio: Failed - Check Console", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
-            y_pos += 30
-            if mic_audio_active: cv2.putText(display_frame, f"Mic Audio: {mic_audio_score * 100:.1f}% Fake", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            else: cv2.putText(display_frame, "Mic Audio: Failed / Not Found", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
-
-            cv2.imshow("Live Multimodal Detector", display_frame)
-
-            if cv2.waitKey(1) & 0xFF == ord("c"):
-                break
-
-    cv2.destroyAllWindows()
     face_mesh.close()
+
+class LiveDetectorApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("SHIELD - Multimodal Deepfake Defense")
+        self.geometry("900x1000")
+        ctk.set_appearance_mode("dark")
+        self.configure(fg_color="#0F172A") # Rich dark slate background
+        
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        # Main Layout Configuration
+        self.grid_rowconfigure(0, weight=0) # Top Header
+        self.grid_rowconfigure(1, weight=5) # BIG Video
+        self.grid_rowconfigure(2, weight=3) # Dashboard
+        self.grid_columnconfigure(0, weight=1)
+
+        # --- Header ---
+        self.header_frame = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=0)
+        self.header_frame.grid(row=0, column=0, sticky="nsew")
+        self.header_frame.grid_columnconfigure(0, weight=1)
+        self.header_frame.grid_columnconfigure(1, weight=0)
+
+        self.header_label = ctk.CTkLabel(
+            self.header_frame, 
+            text="SHIELD ACTIVE - SECURE COMMUNICATION", 
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color="#10B981"
+        )
+        self.header_label.grid(row=0, column=0, pady=10)
+
+        self.settings_btn = ctk.CTkButton(
+            self.header_frame, text="⚙ Settings", command=self.toggle_settings,
+            width=30, fg_color="#334155", hover_color="#475569"
+        )
+        self.settings_btn.grid(row=0, column=1, padx=20, pady=10, sticky="e")
+
+        # --- Top Panel: Video Display ---
+        self.video_frame = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=15)
+        self.video_frame.grid(row=1, column=0, padx=30, pady=(20, 10), sticky="nsew")
+        
+        # Loading State UI
+        self.loading_label = ctk.CTkLabel(
+            self.video_frame, 
+            text="Initializing Shield Framework", 
+            text_color="#38BDF8", 
+            font=ctk.CTkFont(size=28, weight="bold")
+        )
+        self.loading_label.pack(expand=True, pady=(50, 5))
+        
+        self.loading_sub_label = ctk.CTkLabel(
+            self.video_frame, 
+            text="Loading tensor models into memory. Please wait...", 
+            text_color="#94A3B8", 
+            font=ctk.CTkFont(size=16)
+        )
+        self.loading_sub_label.pack(pady=(0, 20))
+        
+        self.loading_bar = ctk.CTkProgressBar(self.video_frame, width=400, mode="indeterminate", progress_color="#38BDF8")
+        self.loading_bar.pack(pady=10)
+        self.loading_bar.start()
+
+        # The actual image label (hidden at start)
+        self.video_label = ctk.CTkLabel(self.video_frame, text="")
+        
+        # --- Bottom Panel: Dashboard ---
+        self.info_frame = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=15)
+        self.info_frame.grid(row=2, column=0, padx=30, pady=(10, 30), sticky="nsew")
+        self.info_frame.grid_columnconfigure((0, 1, 2), weight=1)
+
+        # Overview Section
+        self.verdict_title = ctk.CTkLabel(self.info_frame, text="THREAT ANALYSIS", font=ctk.CTkFont(size=14, weight="bold"), text_color="#94A3B8")
+        self.verdict_title.grid(row=0, column=0, columnspan=3, pady=(15, 0))
+
+        self.verdict_label = ctk.CTkLabel(self.info_frame, text="Awaiting Data...", font=ctk.CTkFont(size=42, weight="bold"), text_color="#64748B")
+        self.verdict_label.grid(row=1, column=0, columnspan=3, pady=(0, 20))
+
+        # Add metric meters
+        self.add_modern_meter(0, "Deepfake Video", "video_prob", "video_bar")
+        self.add_modern_meter(1, "System Audio", "sys_audio_prob", "sys_audio_bar")
+        self.add_modern_meter(2, "Microphone", "mic_audio_prob", "mic_audio_bar")
+
+
+
+        # Async Model Loading
+        self.models_loaded = False
+        threading.Thread(target=self.load_models_async, daemon=True).start()
+
+        # --- Settings Flyout ---
+        self.settings_open = False
+        self.settings_frame = ctk.CTkFrame(self, fg_color="#0F172A", border_width=2, border_color="#38BDF8", corner_radius=10, width=250, height=300)
+        
+        ctk.CTkLabel(self.settings_frame, text="Settings", font=ctk.CTkFont(size=20, weight="bold"), text_color="#F1F5F9").pack(pady=(15, 10))
+
+        ctk.CTkLabel(self.settings_frame, text="Warning Threshold", text_color="#F59E0B").pack(pady=(10, 0))
+        self.warn_slider = ctk.CTkSlider(self.settings_frame, from_=0.1, to=0.99, command=self.update_warn_thresh)
+        self.warn_slider.set(VIDEO_CONFIG.get('warn_threshold', 0.75))
+        self.warn_slider.pack(pady=5, padx=20)
+        self.warn_label = ctk.CTkLabel(self.settings_frame, text=f"{self.warn_slider.get():.2f}")
+        self.warn_label.pack(pady=(0, 5))
+
+        ctk.CTkLabel(self.settings_frame, text="Critical Threshold", text_color="#EF4444").pack(pady=(10, 0))
+        self.crit_slider = ctk.CTkSlider(self.settings_frame, from_=0.1, to=0.99, command=self.update_crit_thresh)
+        self.crit_slider.set(VIDEO_CONFIG.get('high_conf_threshold', 0.95))
+        self.crit_slider.pack(pady=5, padx=20)
+        self.crit_label = ctk.CTkLabel(self.settings_frame, text=f"{self.crit_slider.get():.2f}")
+        self.crit_label.pack(pady=(0, 5))
+        
+        self.save_btn = ctk.CTkButton(self.settings_frame, text="Save to Config", command=self.save_config, fg_color="#10B981", hover_color="#059669")
+        self.save_btn.pack(pady=15)
+
+        # Start GUI update loop
+        self.update_gui()
+
+    def add_modern_meter(self, col, title, prob_attr, bar_attr):
+        frame = ctk.CTkFrame(self.info_frame, fg_color="transparent")
+        frame.grid(row=2, column=col, padx=10, pady=10, sticky="nsew")
+        
+        title_lbl = ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=16, weight="bold"), text_color="#CBD5E1")
+        title_lbl.pack(pady=(0, 5))
+        
+        val_lbl = ctk.CTkLabel(frame, text="0.0%", font=ctk.CTkFont(size=24, weight="bold"), text_color="#F1F5F9")
+        val_lbl.pack(pady=0)
+        setattr(self, prob_attr, val_lbl)
+        
+        bar = ctk.CTkProgressBar(frame, width=180, height=12)
+        bar.set(0)
+        bar.pack(pady=(10, 5))
+        setattr(self, bar_attr, bar)
+        
+    def load_models_async(self):
+        try:
+            print("[Async] Loading models for in-memory processing...")
+            audio_model = AudioModel.to(device)
+            audio_model.eval()
+            print("[Async] Audio model loaded successfully.")
+
+            video_model_name = 'efficientnet-b0'
+            blocks_args, global_params = get_model_params(video_model_name, {'num_classes': 2})
+            video_model = EfficientNet(blocks_args, global_params).to(device)
+            from utils import get_resource_path
+            model_path = get_resource_path(os.path.join('models', 'video_deepfake_detector.pth'))
+            state_dict = torch.load(model_path, map_location=device)
+            video_model.load_state_dict(state_dict)
+            video_model.eval()
+            print("[Async] Video model loaded successfully.")
+
+            self.models_loaded = True
+            
+            # Start capturing threads now that models are ready
+            threading.Thread(target=system_audio_capture_thread, args=(audio_model,), daemon=True).start()
+            threading.Thread(target=microphone_capture_thread, args=(audio_model,), daemon=True).start()
+            threading.Thread(target=video_capture_thread, args=(video_model,), daemon=True).start()
+            
+            # Remove loading elements
+            self.loading_label.destroy()
+            self.loading_sub_label.destroy()
+            self.loading_bar.stop()
+            self.loading_bar.destroy()
+            
+            self.video_label.pack(expand=True, fill="both", padx=5, pady=5)
+            self.video_label.configure(text="Awaiting Video Stream...", text_color="#94A3B8")
+            
+        except Exception as e:
+            print(f"[Async] Fatal error loading models: {e}")
+            self.loading_label.configure(text=f"Integrity Check Failed", text_color="#EF4444")
+            self.loading_sub_label.configure(text=f"Error: {e}", text_color="#EF4444")
+            self.loading_bar.stop()
+
+
+
+    def on_closing(self):
+        """Shut down threads safely on window close."""
+        with shared_state['lock']:
+            shared_state['running'] = False
+        self.destroy()
+        
+    def toggle_settings(self):
+        if self.settings_open:
+            self.settings_frame.place_forget()
+            self.settings_open = False
+        else:
+            # Place on top right below header
+            self.settings_frame.place(relx=1.0, rely=0.0, anchor="ne", x=-20, y=60)
+            self.settings_open = True
+
+    def update_warn_thresh(self, value):
+        VIDEO_CONFIG['warn_threshold'] = value
+        self.warn_label.configure(text=f"{value:.2f}")
+
+    def update_crit_thresh(self, value):
+        VIDEO_CONFIG['high_conf_threshold'] = value
+        self.crit_label.configure(text=f"{value:.2f}")
+
+    def save_config(self):
+        APP_CONFIG['video'] = VIDEO_CONFIG
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(APP_CONFIG, f, indent=4)
+        except Exception as e:
+            logger.error(f"Failed to save config: {e}")
+
+    def update_gui(self):
+        """Periodically refresh GUI elements with thread safe data."""
+        with shared_state['lock']:
+            try:
+                shared_state['mouse_x'] = self.winfo_pointerx()
+                shared_state['mouse_y'] = self.winfo_pointery()
+            except Exception:
+                pass
+            frame_rgb = shared_state['latest_frame']
+            v_score = shared_state['video_score']
+            s_score = shared_state['system_audio_score']
+            m_score = shared_state['mic_audio_score']
+            sys_act = shared_state['system_audio_active']
+            mic_act = shared_state['mic_audio_active']
+            sys_silence = shared_state['system_audio_silence']
+            mic_silence = shared_state['mic_audio_silence']
+        
+        # 1. Update Video Feed
+        if frame_rgb is not None and self.models_loaded:
+            img = Image.fromarray(frame_rgb)
+            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(700, 480))
+            self.video_label.configure(image=ctk_img, text="")
+        
+        # 2. Update Scores and Logic
+        active_scores = [v_score]
+        if sys_act and not sys_silence: active_scores.append(s_score)
+        if mic_act and not mic_silence: active_scores.append(m_score)
+        final_score = np.mean(active_scores) if active_scores else 0.0
+
+        if final_score > VIDEO_CONFIG.get('high_conf_threshold', 0.95): verdict, color = "⚠️ CRITICAL: DEEPFAKE DETECTED", "#EF4444"
+        elif final_score > VIDEO_CONFIG.get('warn_threshold', 0.75): verdict, color = "⚠️ WARNING: SYNTHETIC PATTERNS", "#F59E0B"
+        else: verdict, color = "✅ COMMUNICATION SECURE", "#10B981"
+
+        if not self.models_loaded:
+            verdict, color = "INITIALIZING", "#38BDF8"
+
+        self.verdict_label.configure(text=verdict, text_color=color)
+
+        self.video_prob.configure(text=f"{v_score*100:.1f}%")
+        self.video_bar.set(v_score)
+        self.video_bar.configure(progress_color="#EF4444" if v_score > VIDEO_CONFIG.get('warn_threshold', 0.75) else "#10B981")
+
+        if sys_act:
+            if sys_silence:
+                self.sys_audio_prob.configure(text="Silence", text_color="#64748B")
+                self.sys_audio_bar.set(s_score)
+                self.sys_audio_bar.configure(progress_color="#334155")
+            else:
+                self.sys_audio_prob.configure(text=f"{s_score*100:.1f}%", text_color="#F1F5F9")
+                self.sys_audio_bar.set(s_score)
+                self.sys_audio_bar.configure(progress_color="#EF4444" if s_score > VIDEO_CONFIG.get('warn_threshold', 0.75) else "#10B981")
+        else:
+            self.sys_audio_prob.configure(text="No Loopback", text_color="#64748B")
+            self.sys_audio_bar.set(0)
+            self.sys_audio_bar.configure(progress_color="#334155")
+
+        if mic_act:
+            if mic_silence:
+                self.mic_audio_prob.configure(text="Silence", text_color="#64748B")
+                self.mic_audio_bar.set(m_score)
+                self.mic_audio_bar.configure(progress_color="#334155")
+            else:
+                self.mic_audio_prob.configure(text=f"{m_score*100:.1f}%", text_color="#F1F5F9")
+                self.mic_audio_bar.set(m_score)
+                self.mic_audio_bar.configure(progress_color="#EF4444" if m_score > VIDEO_CONFIG.get('warn_threshold', 0.75) else "#10B981")
+        else:
+            self.mic_audio_prob.configure(text="No Mic", text_color="#64748B")
+            self.mic_audio_bar.set(0)
+            self.mic_audio_bar.configure(progress_color="#334155")
+
+        # Reschedule update GUI
+        self.after(30, self.update_gui)
+
+def main() -> None:
+    print("Starting Advanced Live Multimodal Desktop Detector (GUI)...")
+    app = LiveDetectorApp()
+    app.mainloop()
     print("Detector stopped.")
 
 if __name__ == "__main__":
     try:
-        print("Loading models for in-memory processing...")
-        # Audio Model
-        audio_model = AudioModel.to(device)
-        audio_model.eval()
-        print("Audio model loaded successfully.")
-
-        # Video Model
-        video_model_name = 'efficientnet-b0'
-        blocks_args, global_params = get_model_params(video_model_name, {'num_classes': 2})
-        video_model = EfficientNet(blocks_args, global_params).to(device)
-        from utils import get_resource_path
-        model_path = get_resource_path(os.path.join('models', 'video_deepfake_detector.pth'))
-        state_dict = torch.load(model_path, map_location=device)
-        video_model.load_state_dict(state_dict)
-        video_model.eval()
-        print("Video model loaded successfully.")
-        
-        # Start the main application loop
-        main(video_model, audio_model)
-
+        main()
     except Exception as e:
         print(f"FATAL: Could not start the application. Error: {e}")
-
