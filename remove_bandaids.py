@@ -38,9 +38,9 @@ LOGIT_PENALTY_REPLACEMENT = (
 
 if LOGIT_PENALTY_LINE in code:
     code = code.replace(LOGIT_PENALTY_LINE, LOGIT_PENALTY_REPLACEMENT)
-    print("  ✓ Removed fake_logit_penalty subtraction")
+    print("  [OK] Removed fake_logit_penalty subtraction")
 else:
-    print("  ! fake_logit_penalty line not found (may already be removed)")
+    print("  [WARN] fake_logit_penalty line not found (may already be removed)")
 
 # Remove the score multiplier line inside system_audio_capture_thread
 MULTIPLIER_LINE = (
@@ -53,12 +53,12 @@ MULTIPLIER_REPLACEMENT = (
 
 if MULTIPLIER_LINE in code:
     code = code.replace(MULTIPLIER_LINE, MULTIPLIER_REPLACEMENT)
-    print("  ✓ Removed system_audio_penalty_multiplier scaling")
+    print("  [OK] Removed system_audio_penalty_multiplier scaling")
 else:
-    print("  ! system_audio_penalty_multiplier line not found (may already be removed)")
+    print("  [WARN] system_audio_penalty_multiplier line not found (may already be removed)")
 
 SRC.write_text(code, encoding="utf-8")
-print("  ✓ desktop_live_capture.py saved")
+print("  [OK] desktop_live_capture.py saved")
 
 # ── 2. Patch config.json ────────────────────────────────────────────────────
 print("\nPatching config.json…")
@@ -77,9 +77,9 @@ with open(CFG, "w") as f:
     json.dump(cfg, f, indent=4)
 
 if removed:
-    print(f"  ✓ Removed keys: {', '.join(removed)}")
+    print(f"  [OK] Removed keys: {', '.join(removed)}")
 else:
-    print("  ! Keys already absent from config.json")
+    print("  [WARN] Keys already absent from config.json")
 
 # ── 3. Update README.md ─────────────────────────────────────────────────────
 print("\nUpdating README.md…")
@@ -128,12 +128,12 @@ if "### 3. Core AI Retraining" in readme:
         1,  # only first occurrence
     )
     README.write_text(readme, encoding="utf-8")
-    print("  ✓ README.md updated — item moved to Completed")
+    print("  [OK] README.md updated — item moved to Completed")
 else:
-    print("  ! README.md section not found (may already be updated)")
+    print("  [WARN] README.md section not found (may already be updated)")
 
 print()
 print("=" * 60)
-print("  ✅ Band-aids removed successfully!")
+print("  [SUCCESS] Band-aids removed successfully!")
 print("  The application now uses the natively calibrated model.")
 print("=" * 60)

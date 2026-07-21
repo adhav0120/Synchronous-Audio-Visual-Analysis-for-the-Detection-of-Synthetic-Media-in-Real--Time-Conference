@@ -12,6 +12,8 @@ Based on an analysis of the current project structure and the `desktop_live_capt
 *   ✅ **Type Hinting & Testing:** Introduced Python type hints across all logic files, and implemented a robust `pytest` suite (`test_models.py`) to validate architecture math and configs.
 *   ✅ **Proper Logging System:** Replaced raw `print()` statements with a clean Python `logging` pipeline that outputs to both a `shield_defense.log` record and the console stream.
 
+*   ✅ **True Model Calibration:** Fine-tuned the `transformer_voice_detector.pth` Transformer on a balanced dataset (ASVspoof 2019 LA + LibriSpeech dev-clean) using WeightedRandomSampler and label-smoothed CrossEntropyLoss. The model now naturally scores genuine speech as bonafide — no more hardcoded `score -= 2.0` or `0.60×` penalty multiplier post-processing.
+
 ---
 
 ## 🚀 Remaining Improvements to Tackle 
@@ -22,6 +24,3 @@ Based on an analysis of the current project structure and the `desktop_live_capt
 ### 2. Audio Capture Upgrades (System Loopback)
 *   **Robust Audio Loopback (PyAudio):** Windows audio loopback capture via the current `soundcard` module is notoriously brittle and relies on exact heuristic string matching. **Improvement:** Completely rewrite the audio pipeline to use `PyAudio` with native `WASAPI` APIs, which is incredibly stable and far less prone to failure on multi-monitor/multi-speaker systems.
 *   **Cross-Platform Architecture:** Screen capture and audio loopback mechanisms currently rely on Windows paradigms. **Improvement:** Begin building in MacOS/Linux abstraction layers so the system can run on any OS natively.
-
-### 3. Core AI Retraining
-*   **True Model Calibration:** Right now, there is a literal mathematical subtraction (`score -= 2.0`) being forced onto the AI model outputs to reduce false positive rates. This works, but is technically a band-aid limit. **Improvement:** Gather a comprehensive dataset of "negative examples" (non-deepfakes) and completely retrain the actual `.pth` PyTorch model to naturally understand these boundaries without needing hardcoded post-processing limits!

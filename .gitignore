@@ -15,15 +15,21 @@ build/
 .vscode/
 .idea/
 
-# Large Files / Models
-models/*.pth
+# Large Files / Datasets / Models
+models/
+data/
+deepfake-whatsapp-video-activity-tracker-master/
 src/ffmpeg.exe
 *.dat
+*.bak
 
-
-# Logs/Temp
+# Logs / Temp / Local configs
 *.log
+out*.txt
+tmp_*.txt
+face_test.txt
+mics.json
 mp_init.txt
-
-# Java (if unrelated)
 openJdk-25/
+
+

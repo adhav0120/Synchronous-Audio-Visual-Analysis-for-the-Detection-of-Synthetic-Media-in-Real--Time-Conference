@@ -1,8 +1,6 @@
 {
     "audio": {
-        "silence_threshold": 0.002,
-        "system_audio_penalty_multiplier": 0.6,
-        "fake_logit_penalty": 2.0
+        "silence_threshold": 0.002
     },
     "video": {
         "high_conf_threshold": 0.95,

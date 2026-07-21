@@ -86,8 +86,7 @@ def predict_audio_from_chunk(audio_data: np.ndarray, model: torch.nn.Module) -> 
     mel_spec = mel_spectrogram(waveform).to(device)
     with torch.no_grad():
         output = model(mel_spec)
-        # Apply a mathematical penalty to the 'Fake' logit to reduce artificial sensitivity
-        output[0][1] -= AUDIO_CONFIG.get('fake_logit_penalty', 2.0)
+        # No post-hoc logit adjustment needed — model is natively calibrated
         probabilities = torch.softmax(output, dim=1)
         score = probabilities[0][1].item()
     return score
@@ -133,8 +132,7 @@ def system_audio_capture_thread(audio_model: torch.nn.Module) -> None:
         
         def run_inference(data_chunk):
             score = predict_audio_from_chunk(data_chunk, audio_model)
-            # Artificially cap the system audio score to 60% of its raw output
-            score = score * AUDIO_CONFIG.get('system_audio_penalty_multiplier', 0.60)
+            # Score used directly — model is natively calibrated
             with shared_state['lock']:
                 shared_state['system_audio_score'] = score
                 
